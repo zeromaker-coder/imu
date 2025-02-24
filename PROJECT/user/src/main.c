@@ -74,7 +74,8 @@
 
 #define PWM_PERIOD 30000  // PWM周期 30KHz 
 #define MOTOR_DEAD_VAL 800  // 电机死区值
-#define MOTOR_MAX 5000  // 电机最大速度
+#define MOTOR_MAX 3000  // 电机最大速度
+#define MOTOR_STOP 400  // 电机停止速度 小于这个值认为电机停止 输出PWM为0
 
 #define PIT_TIME 1  // 进入中断的时间间隔 单位 ms
 
@@ -84,8 +85,8 @@
 #define CAR_POSITION_MIN -1000    // 积分下限
 
 
-#define MECH_MID 0.0f       // 定义机械中值（直立时目标角度），单位：度
-
+#define MECH_MID 1.5f       // 定义机械中值（直立时目标角度），单位：度
+#define CAR_ANGLE_SET   (MECH_MID  + speedControlOutSmooth)  // 目标角度 单位：度
 int16 encoder1_data = 0;
 int16 encoder2_data = 0;
 
@@ -106,9 +107,8 @@ float speed_P = 0.2f;             // 比例系数
 float speed_I = 0.05f;            // 积分系数
 
 // 角度内环 PID 参数
-float angle_kp = 1.0f;      // 比例系数
-float angle_ki = 0.01f;     // 积分系数
-float angle_kd = 0.0f;      // 微分系数（若不使用，可设为0）
+float angle_kp = 220.0f;      // 比例系数
+float angle_kd = 0.0f;      // 微分系数
 
 // 角度内环 PID 内部变量
 float angleIntegral = 0.0f;   // 积分累计
@@ -149,14 +149,30 @@ void Motor_Init(void)
  */
 void Motor_SetSpeed(motor_enum motor, int16 speed)
 {
+    //调试用 不然我桌子鸡飞蛋打
+    if (imu_Angle_Filted.Pitch - CAR_ANGLE_SET > 30 || imu_Angle_Filted.Pitch - CAR_ANGLE_SET < -30)
+    {
+        speed = 0;
+    }
     
-    speed = (speed>0)?speed+MOTOR_DEAD_VAL:(speed<0)?speed-MOTOR_DEAD_VAL:0;              // 死区控制
-    speed = (speed>MOTOR_MAX)?MOTOR_MAX:(speed<-MOTOR_MAX)?-MOTOR_MAX:speed;                            // 限制速度范围
+    if(speed > -MOTOR_STOP && speed < MOTOR_STOP)                                    // 速度小于电机停止速度
+    {
+        speed = 0;                                                                  // 设置速度为0
+    }
+    else if(0<speed&&speed<MOTOR_DEAD_VAL)                                           // 速度小于电机死区值
+    {
+        speed = MOTOR_DEAD_VAL;                                                     // 设置速度为电机死区值
+    }
+    else if(0>speed&&speed>-MOTOR_DEAD_VAL)                                          // 速度小于电机死区值
+    {
+        speed = -MOTOR_DEAD_VAL;                                                    // 设置速度为电机死区值
+    }
+    speed = (speed>MOTOR_MAX)?MOTOR_MAX:(speed<-MOTOR_MAX)?-MOTOR_MAX:speed;                                                                             // 限制速度范围
     if(speed > 0)
     {
         if(motor == Left)
         {
-            gpio_set_level(Motor1_DIR,GPIO_LOW);                                       // 设置电机1方向为正转
+            gpio_set_level(Motor1_DIR,GPIO_LOW);                                        // 设置电机1方向为正转
             pwm_set_duty(Motor1_PWM, speed);                                            // 更新对应通道占空比
         }
         else
@@ -170,7 +186,7 @@ void Motor_SetSpeed(motor_enum motor, int16 speed)
         if(motor == Left)
         {
             gpio_set_level(Motor1_DIR,GPIO_HIGH);                                        // 设置电机1方向为反转
-            pwm_set_duty(Motor1_PWM, -speed);                                           // 更新对应通道占空比
+            pwm_set_duty(Motor1_PWM, -speed);                                            // 更新对应通道占空比
         }
         else
         {
@@ -246,24 +262,20 @@ void Speed_Control_Output(void)
 // 根据 imu_Angle_Filted.Pitch 与目标机械中值 MECH_MID 的误差计算 PID 输出
 void Angle_PID_Control(void)
 {
-    float error, P, I, D;
+    float error, P, D;
     
     // 误差：目标角度 - 当前角度
-    error = MECH_MID  + speedControlOutSmooth - imu_Angle_Filted.Pitch;
+    error = imu_Angle_Filted.Pitch - CAR_ANGLE_SET;
     
     // 计算比例项
     P = error * angle_kp;
-    
-    // 积分项累加（可根据需要增加积分限幅保护）
-    angleIntegral += error * angle_ki;
-    I = angleIntegral;
     
     // 计算微分项
     D = (error - angleLastError) * angle_kd;
     angleLastError = error;
     
     // 角度内环控制输出
-    angleControlOut = P + I + D;
+    angleControlOut = P + D;
     
     // 此处可根据实际需要，将 angleControlOut 与速度外环平滑输出叠加，
     // 或作为独立内环输出直接用于后续电机 PWM 控制调整直立角度。
@@ -330,16 +342,17 @@ void pit_handler (void)
         mpu6050_get_gyro();                                                            // 获取陀螺仪数据
         IMU_getEuleranAngles();                                                        // 获取欧拉角
         Angle_PID_Control();                                                           // 角度环控制
-
+        Motor_SetSpeed(Left, angleControlOut);                                         // 左轮速度控制
+        Motor_SetSpeed(Right, angleControlOut);                                        // 右轮速度控制
     }
     if (time % 25 == 0)
     {
         // 速度环控制
-        Speed_PID_Control();
+        //Speed_PID_Control();
 
         time=0;
     }
-    Speed_Control_Output();                                                          // 速度环平滑输出
+    //Speed_Control_Output();                                                          // 速度环平滑输出
 
 
     
