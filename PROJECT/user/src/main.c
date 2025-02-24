@@ -72,42 +72,15 @@
 #define ENCODER2_QUADDEC_A               (TIM4_ENCODER_CH1_B6)                   // A 对应的引脚
 #define ENCODER2_QUADDEC_B                 (TIM4_ENCODER_CH2_B7)                 // B 对应的引脚
 
-// 增量和累积限幅值
-#define DELTA_LIMIT 1000
-#define COMMAND_LIMIT 5000
+#define PWM_PERIOD 30000  // PWM周期 30KHz 
+#define MOTOR_DEAD_VAL 800  // 电机死区值
+#define MOTOR_MAX 5000  // 电机最大速度
 
-#define PIT_TIME 2  // 进入中断的时间间隔 单位 ms
+#define PIT_TIME 1  // 进入中断的时间间隔 单位 ms
 int16 encoder1_data = 0;
 int16 encoder2_data = 0;
 
-// 外环PID（平衡控制）参数
-float desiredPitch = 20.0f;         // 期望倾斜角度（单位：度）
-float Kp_angle = 10;
-float Ki_angle = 0.1f;
-float Kd_angle = 0.0f;
-
-float angleIntegral = 0.0f;
-float lastAngleError = 0.0f;
-
-// 内环PID（速度控制）参数
-float desiredSpeed = 0.0f;            // 期望基准速度（可为正、负，单位与编码器数据对应）
-
-
-float Kp_speed = 20 ;
-float Ki_speed = 0.5;
-float Kd_speed = 0;         // 增量式D 没啥卵用
-
-float speedIntegral_left = 0.0f, speedIntegral_right = 0.0f;        // 积分项
-float lastSpeedError_left = 0.0f, lastSpeedError_right = 0.0f;      // 上一次误差
-float preSpeedError_left = 0.0f, preSpeedError_right = 0.0f;        // 上上次误差
-
-float P_NUM,I_NUM,D_NUM;    // 调试用 看看各个项的值
-// 转向控制（外加控制），正负值表示左右转向
-float desiredTurn = 0.0f;
-
-int16 leftCommand=0;
-int16 rightCommand=0;
-
+uint16 time = 0;            // 在pit中断中的时间计数
 
 typedef enum
 {
@@ -137,7 +110,9 @@ void Motor_Init(void)
  */
 void Motor_SetSpeed(motor_enum motor, int16 speed)
 {
-    speed = (speed>5000)?5000:(speed<-5000)?-5000:speed;                            // 限制速度范围
+    
+    speed = (speed>0)?speed+MOTOR_DEAD_VAL:(speed<0)?speed-MOTOR_DEAD_VAL:0;              // 死区控制
+    speed = (speed>MOTOR_MAX)?MOTOR_MAX:(speed<-MOTOR_MAX)?-MOTOR_MAX:speed;                            // 限制速度范围
     if(speed > 0)
     {
         if(motor == Left)
@@ -166,15 +141,6 @@ void Motor_SetSpeed(motor_enum motor, int16 speed)
     }
 }
 
-void Set_Target_Pitch(float pitch)
-{
-    desiredPitch = pitch;
-}
-
-void Set_Target_Speed(int16 speed)
-{
-    desiredSpeed = speed;
-}
 
 
 int main (void)
@@ -185,114 +151,33 @@ int main (void)
     // 此处编写用户代码 例如外设初始化代码等
 
     Motor_Init();                             // 初始化电机
-    encoder_quad_init(ENCODER1_QUADDEC, ENCODER1_QUADDEC_A, ENCODER1_QUADDEC_B);   // 初始化编码器模块与引脚 正交解码编码器模式
+    encoder_quad_init(ENCODER1_QUADDEC, ENCODER1_QUADDEC_A, ENCODER1_QUADDEC_B);          // 初始化编码器模块与引脚 正交解码编码器模式
     encoder_quad_init(ENCODER2_QUADDEC, ENCODER2_QUADDEC_A, ENCODER2_QUADDEC_B);          // 初始化编码器模块与引脚 带方向增量编码器模式
 
-    pit_ms_init(PIT, PIT_TIME);                                                      // 初始化 PIT 为周期中断
+    pit_ms_init(PIT, PIT_TIME);                                                           // 初始化 PIT 为周期中断
 
-    interrupt_set_priority(PIT_PRIORITY, 0);                                    // 设置 PIT 对周期中断的中断优先级为 0
+    interrupt_set_priority(PIT_PRIORITY, 0);                                              // 设置 PIT 对周期中断的中断优先级为 0
     // 此处编写用户代码 例如外设初始化代码等
 
-    mpu6050_init();                                                             // 初始化 MPU6050
-    Set_Target_Speed(100);                                                     // 设置期望速度
-    uint32 time = 0;
+    mpu6050_init();                                                                       // 初始化 MPU6050                                                   // 设置期望速度
+    uint16 pwm=600;
     while(1)
     {
-        printf("%d,%d,%d,%d,%f,%f,%f\n",encoder1_data,encoder2_data,leftCommand,rightCommand,P_NUM,I_NUM,imu_Angle.Pitch);
-        system_delay_ms(11);
+        printf("%f,%f,%f\n",imu_Angle_Filted.Roll,imu_Angle_Filted.Pitch,imu_Angle_Filted.Yaw);       // 打印欧拉角
+
     }
+
+
 }
 
 // **************************** 代码区域 ****************************
 
 
 
-// 串级pid控制算法
-// 目标 : 双路小车翘头平衡 实现小车的平衡控制 使得mpu6050的 Pitch 角度保持在20度左右 另外加入速度的控制 和 转向的控制
-// 理想状态 : 小车在平衡状态下可以前进后退 旋转 
-// 输入为编码器的期望值和方向的期望
-// 现象为 小车稳定保证Pitch角度在20度左右 并且 小车速度为期望值 并且小车可以转向
-// 串级PID控制算法的核心思想是将两个PID控制器串联起来，外环控制的是内环控制器的输入，内环控制器控制的是系统的输出
-// 串级PID控制器的优点是可以有效的减小系统的超调量，提高系统的稳定性
-
-// 串级PID控制函数：外环控制平衡，内环控制电机速度，综合获得左右电机控制命令
-void cascade_pid_control(void)
-{
-    // 采样周期（单位：秒），本工程中PIT周期为PIT_TIME ms
-    const float dt = PIT_TIME / 1000.0f;
-
-    // -----------------------------
-    // 外环PID：角度控制（平衡控制）
-    // -----------------------------
-    // 当前Pitch角度由IMU_getEuleranAngles()更新到 imu_Angle.Pitch
-    float angleError = desiredPitch - imu_Angle.Pitch;
-    angleIntegral += angleError * dt;
-    float dAngle = (angleError - lastAngleError) / dt;
-    float anglePID = Kp_angle * angleError + Ki_angle * angleIntegral + Kd_angle * dAngle;
-    lastAngleError = angleError;
-    
-    // 调试先屏蔽外环PID
-
-    anglePID = 0;
-
-    // 外环输出作为内环的目标速度（例如：向前运动以产生纠正力）
-    float targetSpeed = desiredSpeed + anglePID;
-
-   
 
 
- // -----------------------------
-    // 内环PID：速度控制（电机转速反馈）-- 增量式PID实现
-    // -----------------------------
-    // 左侧电机
-
-    float currentLeftError = targetSpeed - (float)encoder1_data;
-    P_NUM=Kp_speed * (currentLeftError - lastSpeedError_left);
-    I_NUM=Ki_speed * currentLeftError;
-    D_NUM=Kd_speed * (currentLeftError - 2.0f * lastSpeedError_left + preSpeedError_left);
-    float delta_left = Kp_speed * (currentLeftError - lastSpeedError_left)
-                         + Ki_speed * currentLeftError
-                         + Kd_speed * (currentLeftError - 2.0f * lastSpeedError_left + preSpeedError_left);
-    // 增量限幅
-    if (delta_left > DELTA_LIMIT) delta_left = DELTA_LIMIT;
-    if (delta_left < -DELTA_LIMIT) delta_left = -DELTA_LIMIT;
-    // 累加增量调整控制命令
-    leftCommand = leftCommand + (int16)delta_left;
-    // 累积限幅
-    if (leftCommand > COMMAND_LIMIT) leftCommand = COMMAND_LIMIT;
-    if (leftCommand < -COMMAND_LIMIT) leftCommand = -COMMAND_LIMIT;
-    // 更新误差存储
-    preSpeedError_left = lastSpeedError_left;
-    lastSpeedError_left = currentLeftError;
-
-    
-    // 右侧电机
-    float currentRightError = targetSpeed - (float)encoder2_data;
-    float delta_right = Kp_speed * (currentRightError - lastSpeedError_right)
-                          + Ki_speed * currentRightError
-                          + Kd_speed * (currentRightError - 2.0f * lastSpeedError_right + preSpeedError_right);
-    // 增量限幅
-    if (delta_right > DELTA_LIMIT) delta_right = DELTA_LIMIT;
-    if (delta_right < -DELTA_LIMIT) delta_right = -DELTA_LIMIT;
-    rightCommand = rightCommand + (int16)delta_right;
-    // 累积限幅
-    if (rightCommand > COMMAND_LIMIT) rightCommand = COMMAND_LIMIT;
-    if (rightCommand < -COMMAND_LIMIT) rightCommand = -COMMAND_LIMIT;
-    preSpeedError_right = lastSpeedError_right;
-    lastSpeedError_right = currentRightError;
-    
-    // -----------------------------
-    // 综合转向控制（直接加减desiredTurn）
-    // -----------------------------
-    leftCommand = leftCommand + (int16)desiredTurn;
-    rightCommand = rightCommand - (int16)desiredTurn;
-
-    Motor_SetSpeed(Left, leftCommand);
-    Motor_SetSpeed(Right, rightCommand);
-}
-
-
-
+// **************************** 中断处理函数 ****************************
+// 设置为
 
 //-------------------------------------------------------------------------------------------------------------------
 // 函数简介     PIT 的周期中断处理函数 这个函数将在 PIT 对应的定时器中断调用 详见 isr.c
@@ -301,17 +186,33 @@ void cascade_pid_control(void)
 // 使用示例     pit_handler();
 //-------------------------------------------------------------------------------------------------------------------
 void pit_handler (void)
-{
+{   
+    time++;
     encoder1_data = encoder_get_count(ENCODER1_QUADDEC);                           // 获取编码器计数
     encoder2_data = -encoder_get_count(ENCODER2_QUADDEC);                          // 获取编码器计数
-    mpu6050_get_acc();                                                             // 获取加速度计数据
-    mpu6050_get_gyro();                                                            // 获取陀螺仪数据
-    IMU_getEuleranAngles();                                                        // 获取欧拉角
-
-    cascade_pid_control();                                                         // 串级PID控制
-
     encoder_clear_count(ENCODER1_QUADDEC);                                         // 清空编码器计数
     encoder_clear_count(ENCODER2_QUADDEC);                                         // 清空编码器计数
+
+    // 每次25ms进入速度环闭环pid控制
+    // 每次5ms之中 进行mpu6050姿态解算 进行直立环控制
+
+
+
+    if (time % 5 == 0)
+    {
+        mpu6050_get_acc();                                                             // 获取加速度计数据
+        mpu6050_get_gyro();                                                            // 获取陀螺仪数据
+        IMU_getEuleranAngles();                                                        // 获取欧拉角
+    }
+    if (time % 25 == 0)
+    {
+        // 速度环控制
+        time=0;
+    }
+
+
+    
+    
 }
 
 // *************************** 例程常见问题说明 ***************************

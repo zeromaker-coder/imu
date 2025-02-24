@@ -17,8 +17,7 @@
 				float Yaw;
 							}param_Angle;
 			
-			extern param_Angle imu_Angle;
-
+			extern param_Angle imu_Angle_Filted;
 void IMU_getEuleranAngles(void);
 							
 #endif

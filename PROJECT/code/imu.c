@@ -8,6 +8,7 @@
 
 
 param_imu imu_data;
+param_Angle imu_Angle_Filted;
 param_Angle imu_Angle;
 
 float q[4] = {1.0,0.0,0.0,0.0};
@@ -106,7 +107,9 @@ void IMU_getEuleranAngles(void)
 		imu_Angle.Yaw  += imu_data.GZ* 57.2957* cycle_T* 4;
 	}
 
-
-	
+	//Angle低通滤波
+	imu_Angle_Filted.Pitch = 0.2*imu_Angle.Pitch + 0.8*imu_Angle_Filted.Pitch;
+	imu_Angle_Filted.Roll  = 0.2*imu_Angle.Roll  + 0.8*imu_Angle_Filted.Roll;	
+	imu_Angle_Filted.Yaw   = 0.2*imu_Angle.Yaw   + 0.8*imu_Angle_Filted.Yaw;
 }   
     
