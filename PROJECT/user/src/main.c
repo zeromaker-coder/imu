@@ -77,10 +77,49 @@
 #define MOTOR_MAX 5000  // 电机最大速度
 
 #define PIT_TIME 1  // 进入中断的时间间隔 单位 ms
+
+#define SPEED_CONTROL_PERIOD 25   // 分 25 份，即25ms内平滑输出
+#define CAR_SPEED_SET 1500        // 目标车速（单位视具体系统而定）
+#define CAR_POSITION_MAX 1000     // 积分上限
+#define CAR_POSITION_MIN -1000    // 积分下限
+
+
+#define MECH_MID 0.0f       // 定义机械中值（直立时目标角度），单位：度
+
 int16 encoder1_data = 0;
 int16 encoder2_data = 0;
 
 uint16 time = 0;            // 在pit中断中的时间计数
+
+// 外环速度 PID 控制相关全局变量
+float carSpeed = 0.0f;              // 当前车速，由平均左右轮脉冲获得
+float carSpeedPrev = 0.0f;          // 上一次车速，用于低通滤波
+float carPosition = 0.0f;           // 积分项（车速积分，相当于车位置)
+float speedControlOutOld = 0.0f;    // 上一次速度环 PID 输出值
+float speedControlOutNew = 0.0f;    // 最新一次速度环 PID 输出值
+float speedControlOutSmooth = 0.0f; // 平滑输出，用作内环角度环的输入   //真正的输出值 虽然25ms计算一次 相当于两个点之间的平滑过渡
+
+// 外环平滑输出计时变量（单位：ms）
+int speedControlPeriod = 0;
+
+float speed_P = 0.2f;             // 比例系数
+float speed_I = 0.05f;            // 积分系数
+
+// 角度内环 PID 参数
+float angle_kp = 1.0f;      // 比例系数
+float angle_ki = 0.01f;     // 积分系数
+float angle_kd = 0.0f;      // 微分系数（若不使用，可设为0）
+
+// 角度内环 PID 内部变量
+float angleIntegral = 0.0f;   // 积分累计
+float angleLastError = 0.0f;  // 上一次误差
+float angleControlOut = 0.0f; // 角度内环 PID 输出
+
+
+
+// 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
+volatile int16 leftMotorPulseSigma = 0;
+volatile int16 rightMotorPulseSigma = 0;
 
 typedef enum
 {
@@ -141,7 +180,94 @@ void Motor_SetSpeed(motor_enum motor, int16 speed)
     }
 }
 
+// 速度外环 PID 控制函数，每 25ms调用一次
+void Speed_PID_Control(void)
+{
+    float fP, fI;
+    float fDelta;  // 速度误差
 
+    // 计算当前车速：左右轮脉冲平均
+    carSpeed = (leftMotorPulseSigma + rightMotorPulseSigma) * 0.5f;
+    // 清零编码器累加值，确保下一周期重新采样
+    leftMotorPulseSigma = rightMotorPulseSigma = 0;
+
+    // 对车速进行低通滤波，使车速更平滑
+    carSpeed = 0.7f * carSpeedPrev + 0.3f * carSpeed;
+    carSpeedPrev = carSpeed;
+
+    // 计算车速误差：目标速度与实际速度之差
+    fDelta = CAR_SPEED_SET - carSpeed;
+
+    // 计算比例项和积分项
+    fP = fDelta * speed_P;
+    fI = fDelta * speed_I;
+
+    // 累加积分项（车速度积分，也可理解为车位置）
+    carPosition += fI;
+
+    // 积分限幅保护
+    if ((int)carPosition > CAR_POSITION_MAX)
+        carPosition = CAR_POSITION_MAX;
+    if ((int)carPosition < CAR_POSITION_MIN)
+        carPosition = CAR_POSITION_MIN;
+
+    // 保存上一次的控制输出
+    speedControlOutOld = speedControlOutNew;
+
+    // 当前PI输出 = 比例项 + 积分项
+    speedControlOutNew = fP + carPosition;
+
+    // 重置平滑输出周期计数器，开始新的1ms平滑累计
+    speedControlPeriod = 0;
+}
+
+// 速度外环平滑输出函数，每 1ms调用一次（在1ms系统滴答或定时中断中调用）
+// 将 25ms 内计算得到的 PID 输出差值分步平滑累加到上一次的输出上
+void Speed_Control_Output(void)
+{
+    float fValue;
+    // 计算此次 PID 输出变动量
+    fValue = speedControlOutNew - speedControlOutOld;
+    // 按比例分份， (speedControlPeriod+1) / SPEED_CONTROL_PERIOD 为当前分配比例
+    speedControlOutSmooth = fValue * (speedControlPeriod + 1) / SPEED_CONTROL_PERIOD + speedControlOutOld;
+    
+    // 更新平滑计数器，每1ms增加一次
+    speedControlPeriod++;
+    if (speedControlPeriod >= SPEED_CONTROL_PERIOD)
+    {
+        // 当累计满25份时，确保平滑输出与最新PID输出一致
+        speedControlOutSmooth = speedControlOutNew;
+        speedControlPeriod = SPEED_CONTROL_PERIOD;
+    }
+}
+
+
+// 角度内环 PID 控制函数，每 5ms调用一次（与 IMU 解算周期一致）
+// 根据 imu_Angle_Filted.Pitch 与目标机械中值 MECH_MID 的误差计算 PID 输出
+void Angle_PID_Control(void)
+{
+    float error, P, I, D;
+    
+    // 误差：目标角度 - 当前角度
+    error = MECH_MID  + speedControlOutSmooth - imu_Angle_Filted.Pitch;
+    
+    // 计算比例项
+    P = error * angle_kp;
+    
+    // 积分项累加（可根据需要增加积分限幅保护）
+    angleIntegral += error * angle_ki;
+    I = angleIntegral;
+    
+    // 计算微分项
+    D = (error - angleLastError) * angle_kd;
+    angleLastError = error;
+    
+    // 角度内环控制输出
+    angleControlOut = P + I + D;
+    
+    // 此处可根据实际需要，将 angleControlOut 与速度外环平滑输出叠加，
+    // 或作为独立内环输出直接用于后续电机 PWM 控制调整直立角度。
+}
 
 int main (void)
 {
@@ -159,19 +285,15 @@ int main (void)
     interrupt_set_priority(PIT_PRIORITY, 0);                                              // 设置 PIT 对周期中断的中断优先级为 0
     // 此处编写用户代码 例如外设初始化代码等
 
-    mpu6050_init();                                                                       // 初始化 MPU6050                                                   // 设置期望速度
-    uint16 pwm=600;
+    mpu6050_init();                                                                       // 初始化 MPU6050
     while(1)
     {
-        printf("%f,%f,%f\n",imu_Angle_Filted.Roll,imu_Angle_Filted.Pitch,imu_Angle_Filted.Yaw);       // 打印欧拉角
-
     }
 
 
 }
 
 // **************************** 代码区域 ****************************
-
 
 
 
@@ -193,6 +315,10 @@ void pit_handler (void)
     encoder_clear_count(ENCODER1_QUADDEC);                                         // 清空编码器计数
     encoder_clear_count(ENCODER2_QUADDEC);                                         // 清空编码器计数
 
+    leftMotorPulseSigma  += encoder1_data;                                         // 累加左轮脉冲
+    rightMotorPulseSigma += encoder2_data;                                         // 累加右轮脉冲
+
+
     // 每次25ms进入速度环闭环pid控制
     // 每次5ms之中 进行mpu6050姿态解算 进行直立环控制
 
@@ -203,12 +329,17 @@ void pit_handler (void)
         mpu6050_get_acc();                                                             // 获取加速度计数据
         mpu6050_get_gyro();                                                            // 获取陀螺仪数据
         IMU_getEuleranAngles();                                                        // 获取欧拉角
+        Angle_PID_Control();                                                           // 角度环控制
+
     }
     if (time % 25 == 0)
     {
         // 速度环控制
+        Speed_PID_Control();
+
         time=0;
     }
+    Speed_Control_Output();                                                          // 速度环平滑输出
 
 
     
