@@ -18,6 +18,7 @@
 							}param_Angle;
 			
 			extern param_Angle imu_Angle_Filted;
+			extern param_imu imu_data;
 void IMU_getEuleranAngles(void);
 							
 #endif

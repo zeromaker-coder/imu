@@ -107,15 +107,15 @@ float speed_P = 0.2f;             // 比例系数
 float speed_I = 0.05f;            // 积分系数
 
 // 角度内环 PID 参数
-float angle_kp = 220.0f;      // 比例系数
-float angle_kd = 0.0f;      // 微分系数
+float angle_kp = 350.0f;      // 比例系数
+float angle_kd = 800.0f;      // 微分系数
 
 // 角度内环 PID 内部变量
 float angleIntegral = 0.0f;   // 积分累计
 float angleLastError = 0.0f;  // 上一次误差
 float angleControlOut = 0.0f; // 角度内环 PID 输出
 
-
+float A_P, A_D; //Temp 调参在串口中看看的
 
 // 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
 volatile int16 leftMotorPulseSigma = 0;
@@ -262,23 +262,23 @@ void Speed_Control_Output(void)
 // 根据 imu_Angle_Filted.Pitch 与目标机械中值 MECH_MID 的误差计算 PID 输出
 void Angle_PID_Control(void)
 {
-    float error, P, D;
+    float error;
     
     // 误差：目标角度 - 当前角度
     error = imu_Angle_Filted.Pitch - CAR_ANGLE_SET;
     
     // 计算比例项
-    P = error * angle_kp;
+    A_P = error * angle_kp;
     
     // 计算微分项
-    D = (error - angleLastError) * angle_kd;
+    A_D = (-imu_data.GX) * angle_kd;     // 陀螺仪角速度作为微分项
     angleLastError = error;
     
     // 角度内环控制输出
-    angleControlOut = P + D;
-    
-    // 此处可根据实际需要，将 angleControlOut 与速度外环平滑输出叠加，
-    // 或作为独立内环输出直接用于后续电机 PWM 控制调整直立角度。
+    angleControlOut = A_P + A_D;
+    //printf("%f,%f,%f\n",error,imu_Angle_Filted.Pitch,angleControlOut);
+    // 此处可根据实际需要，将 angleControlOut 与速度外环平滑输出叠加
+    // 或作为独立内环输出直接用于后续电机 PWM 控制调整直立角度
 }
 
 int main (void)
@@ -300,6 +300,7 @@ int main (void)
     mpu6050_init();                                                                       // 初始化 MPU6050
     while(1)
     {
+        printf("%f,%f,%f\n",imu_Angle_Filted.Pitch - CAR_ANGLE_SET,A_P,A_D);
     }
 
 
