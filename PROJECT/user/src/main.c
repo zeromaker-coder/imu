@@ -108,7 +108,7 @@ float speed_I = 0.05f;            // 积分系数
 
 // 角度内环 PID 参数
 float angle_kp = 350.0f;      // 比例系数
-float angle_kd = 800.0f;      // 微分系数
+float angle_kd = 1000.0f;      // 微分系数
 
 // 角度内环 PID 内部变量
 float angleIntegral = 0.0f;   // 积分累计
@@ -271,7 +271,7 @@ void Angle_PID_Control(void)
     A_P = error * angle_kp;
     
     // 计算微分项
-    A_D = (-imu_data.GX) * angle_kd;     // 陀螺仪角速度作为微分项
+    A_D = (-imu_data.GY) * angle_kd;     // 陀螺仪角速度作为微分项
     angleLastError = error;
     
     // 角度内环控制输出
