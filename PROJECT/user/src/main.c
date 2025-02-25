@@ -85,6 +85,7 @@
 #define CAR_POSITION_MIN -1000    // 积分下限
 
 
+
 #define MECH_MID 1.5f       // 定义机械中值（直立时目标角度），单位：度
 #define CAR_ANGLE_SET   (MECH_MID  + speedControlOutSmooth)  // 目标角度 单位：度
 int16 encoder1_data = 0;
@@ -150,24 +151,30 @@ void Motor_Init(void)
 void Motor_SetSpeed(motor_enum motor, int16 speed)
 {
     //调试用 不然我桌子鸡飞蛋打
-    if (imu_Angle_Filted.Pitch - CAR_ANGLE_SET > 30 || imu_Angle_Filted.Pitch - CAR_ANGLE_SET < -30)
-    {
-        speed = 0;
-    }
+    // if (imu_Angle_Filted.Pitch - CAR_ANGLE_SET > 30 || imu_Angle_Filted.Pitch - CAR_ANGLE_SET < -30)
+    // {
+    //     speed = 0;
+    // }
     
-    if(speed > -MOTOR_STOP && speed < MOTOR_STOP)                                    // 速度小于电机停止速度
-    {
-        speed = 0;                                                                  // 设置速度为0
-    }
-    else if(0<speed&&speed<MOTOR_DEAD_VAL)                                           // 速度小于电机死区值
-    {
-        speed = MOTOR_DEAD_VAL;                                                     // 设置速度为电机死区值
-    }
-    else if(0>speed&&speed>-MOTOR_DEAD_VAL)                                          // 速度小于电机死区值
-    {
-        speed = -MOTOR_DEAD_VAL;                                                    // 设置速度为电机死区值
-    }
-    speed = (speed>MOTOR_MAX)?MOTOR_MAX:(speed<-MOTOR_MAX)?-MOTOR_MAX:speed;                                                                             // 限制速度范围
+    // if(speed > -MOTOR_STOP && speed < MOTOR_STOP)                                    // 速度小于电机停止速度
+    // {
+    //     speed = 0;                                                                  // 设置速度为0
+    // }
+    // else if(0<speed&&speed<MOTOR_DEAD_VAL)                                           // 速度小于电机死区值
+    // {
+    //     speed = MOTOR_DEAD_VAL;                                                     // 设置速度为电机死区值
+    // }
+    // else if(0>speed&&speed>-MOTOR_DEAD_VAL)                                          // 速度小于电机死区值
+    // {
+    //     speed = -MOTOR_DEAD_VAL;                                                    // 设置速度为电机死区值
+    // }
+    // speed = (speed>MOTOR_MAX)?MOTOR_MAX:(speed<-MOTOR_MAX)?-MOTOR_MAX:speed;        // 限制速度范围
+
+
+    // DIR1 为1 电机反转
+    // DIR1 为0 电机正转
+    // DIR2 为0 电机反转
+    // DIR2 为1 电机正转
     if(speed > 0)
     {
         if(motor == Left)
@@ -275,7 +282,7 @@ void Angle_PID_Control(void)
     angleLastError = error;
     
     // 角度内环控制输出
-    angleControlOut = A_P + A_D;
+    angleControlOut = A_P + A_D ;
     //printf("%f,%f,%f\n",error,imu_Angle_Filted.Pitch,angleControlOut);
     // 此处可根据实际需要，将 angleControlOut 与速度外环平滑输出叠加
     // 或作为独立内环输出直接用于后续电机 PWM 控制调整直立角度
@@ -297,9 +304,11 @@ int main (void)
     interrupt_set_priority(PIT_PRIORITY, 0);                                              // 设置 PIT 对周期中断的中断优先级为 0
     // 此处编写用户代码 例如外设初始化代码等
 
-    mpu6050_init();                                                                       // 初始化 MPU6050
+    mpu6050_init();                                                                     // 初始化 MPU6050
+    //Motor_SetSpeed(Right, 1000);                                                            
     while(1)
     {
+
         printf("%f,%f,%f\n",imu_Angle_Filted.Pitch - CAR_ANGLE_SET,A_P,A_D);
     }
 
