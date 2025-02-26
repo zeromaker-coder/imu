@@ -80,28 +80,45 @@
 #define PIT_TIME 1  // 进入中断的时间间隔 单位 ms
 
 #define MECH_MID -2.5f       // 定义机械中值（直立时目标角度），单位：度
-#define CAR_ANGLE_SET   (MECH_MID)  // 目标角度 单位：度
+#define CAR_ANGLE_SET   (MECH_MID+velocityControlOut)  // 目标角度 单位：度
+
+// 速度积分限幅
+#define SPEED_INTEGRAL_MAX       15     // 积分上限
+#define SPEED_INTEGRAL_MIN      -15     // 积分下限
+#define SPEED_CONTROL_PERIOD    25      // 速度控制周期（25ms）
+#define SPEED_TARGET            0       // 默认目标速度（可以根据需要修改）
+#define VELOCITY_FILTER_FACTOR  0.7f    // 速度低通滤波系数
+
+/******************************************************** */
 int16 encoder1_data = 0;
 int16 encoder2_data = 0;
+volatile int16 leftMotorPulseSigma = 0; // 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
+volatile int16 rightMotorPulseSigma = 0;// 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
+uint16 time = 0;                        // 在pit中断中的时间计数
 
-uint16 time = 0;            // 在pit中断中的时间计数
+// 速度外环 PID 参数
+float velocity_kp = 0.008f;             // 速度环比例系数
+float velocity_ki = 0.0005f;            // 速度环积分系数
+// 速度外环 PID 内部变量
+float carSpeed = 0.0f;                 // 当前车速
+float carSpeedLast = 0.0f;             // 上一次滤波后的车速
+float speedError = 0.0f;               // 速度误差
+float speedIntegral = 0.0f;            // 速度误差积分
 
-float speed_P = 0.08;             // 比例系数
-float speed_I = 0.005;             // 积分系数
+float P, I;  // 比例项和积分项  调试用 要删除
 
+
+// 速度控制输出
+float velocityControlOut = 0.0f;       // 速度环输出
+/******************************************************** */
 // 角度内环 PID 参数
-float angle_kp = 220.0f;      // 比例系数
-float angle_kd = 100.0f;      // 微分系数
-
+float angle_kp = 600.0f;        // 比例系数
+float angle_kd = 600.0f;        // 微分系数
 // 角度内环 PID 内部变量
 float angleIntegral = 0.0f;   // 积分累计
 float angleLastError = 0.0f;  // 上一次误差
 float angleControlOut = 0.0f; // 角度内环 PID 输出
-
-// 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
-volatile int16 leftMotorPulseSigma = 0;
-volatile int16 rightMotorPulseSigma = 0;
-
+/******************************************************** */
 typedef enum
 {
     Left  = 0,
@@ -113,11 +130,13 @@ void Motor_Init(void)
     gpio_init(Motor1_DIR,GPO,GPIO_HIGH,GPO_PUSH_PULL);                          // 初始化电机1方向控制引脚
     gpio_init(Motor2_DIR,GPO,GPIO_HIGH,GPO_PUSH_PULL);                          // 初始化电机2方向控制引脚
 
+    pwm_init(Motor1_PWM, 30000, 0);                                                // 初始化 PWM 通道 频率 30KHz 初始占空比 0%
+    pwm_init(Motor2_PWM, 30000, 0);                                                // 初始化 PWM 通道 频率 30KHz 初始占空比 0%
+    
     gpio_set_level(Motor1_DIR,GPIO_HIGH);                                       // 设置电机1方向为正转
     gpio_set_level(Motor2_DIR,GPIO_HIGH);                                       // 设置电机2方向为正转
 
-    pwm_init(Motor1_PWM, 30000, 0);                                                // 初始化 PWM 通道 频率 30KHz 初始占空比 0%
-    pwm_init(Motor2_PWM, 30000, 0);                                                // 初始化 PWM 通道 频率 30KHz 初始占空比 0%
+
 }
 
 /******************
@@ -130,7 +149,7 @@ void Motor_Init(void)
 void Motor_SetSpeed(motor_enum motor, int16 speed)
 {
     //调试用 不然我桌子鸡飞蛋打
-    if (imu_Angle_Filted.Pitch - CAR_ANGLE_SET > 30 || imu_Angle_Filted.Pitch - CAR_ANGLE_SET < -30)
+    if (imu_Angle_Filted.Pitch - CAR_ANGLE_SET > 60 || imu_Angle_Filted.Pitch - CAR_ANGLE_SET < -60)
     {
         speed = 0;
     }
@@ -143,7 +162,7 @@ void Motor_SetSpeed(motor_enum motor, int16 speed)
     {
         speed = MOTOR_DEAD_VAL;                                                     // 设置速度为电机死区值
     }
-    else if(0>speed&&speed>-MOTOR_DEAD_VAL)                                          // 速度小于电机死区值
+    else if(0>speed&&speed>-MOTOR_DEAD_VAL)                                         // 速度小于电机死区值
     {
         speed = -MOTOR_DEAD_VAL;                                                    // 设置速度为电机死区值
     }
@@ -183,14 +202,57 @@ void Motor_SetSpeed(motor_enum motor, int16 speed)
 }
 
 
+//==================================================================
+// 函数名：Velocity_Control
+// 描述：速度环PI控制器，每25ms调用一次
+// 参数：target - 目标速度
+// 返回：速度环输出值（作为直立环的角度补偿）
+//==================================================================
+float Velocity_Control(float target)
+{
+
+    float encoderAvg;
+    
+    // 1. 获取当前速度 - 左右编码器平均值
+    encoderAvg = (leftMotorPulseSigma + rightMotorPulseSigma) * 0.5f;
+    
+    // 清零累计值，为下一周期做准备
+    leftMotorPulseSigma = rightMotorPulseSigma = 0;
+    
+    // 2. 低通滤波平滑处理速度值
+    carSpeed = VELOCITY_FILTER_FACTOR * carSpeedLast + (1.0f - VELOCITY_FILTER_FACTOR) * encoderAvg;
+    carSpeedLast = carSpeed;  // 保存本次滤波后的速度
+    
+    // 3. 计算速度偏差（目标速度 - 实际速度）
+    speedError = target - carSpeed;
+    
+    // 4. 计算比例项和积分项
+    P = speedError * velocity_kp;
+    I = speedError * velocity_ki;
+    
+    // 5. 累加积分项
+    speedIntegral += I;
+    
+    // 6. 积分限幅
+    if (speedIntegral > SPEED_INTEGRAL_MAX)
+        speedIntegral = SPEED_INTEGRAL_MAX;
+    else if (speedIntegral < SPEED_INTEGRAL_MIN)
+        speedIntegral = SPEED_INTEGRAL_MIN;
+    
+    // 7. 计算速度环PI控制输出
+    velocityControlOut = P + speedIntegral;
+    
+    return velocityControlOut;
+}
+
+
 // 角度内环 PID 控制函数，每 5ms调用一次（与 IMU 解算周期一致）
 // 根据 imu_Angle_Filted.Pitch 与目标机械中值 MECH_MID 的误差计算 PID 输出
 void Angle_PID_Control(void)
 {
     float error;
     float A_P, A_D;
-    static float A_D_last = 0.0f;
-    
+    // static float A_D_last = 0.0f;
     error = imu_Angle_Filted.Pitch - CAR_ANGLE_SET;  // 计算角度误差
     
     // 计算比例项
@@ -198,14 +260,13 @@ void Angle_PID_Control(void)
     
     // 计算微分项
     // 给角速度环控制输出一个低通滤波 
-    A_D = (-imu_data.GY) * angle_kd;
-    A_D = A_D_last * 0.7f + A_D * 0.3f;
-    A_D_last = A_D;
+    //A_D = (-imu_data.GY)*angle_kd; // 与P项时序没对齐 浪费我一天调参 不如error相减
+    A_D = angle_kd * (error - angleLastError);
     angleLastError = error;
     
     // 角度内环控制输出
-    angleControlOut = A_P + A_D ;
-    //printf("%f,%f,%f\n",error,imu_Angle_Filted.Pitch,angleControlOut);
+    angleControlOut =  A_P+A_D ;
+    printf("%f,%f,%f\n",error,A_P,A_D);
     // 此处可根据实际需要，将 angleControlOut 与速度外环平滑输出叠加
     // 或作为独立内环输出直接用于后续电机 PWM 控制调整直立角度
 }
@@ -216,8 +277,9 @@ int main (void)
     debug_init();                                                               // 初始化默认 debug uart
 
     // 此处编写用户代码 例如外设初始化代码等
- 
     Motor_Init();                             // 初始化电机
+    mpu6050_init(); 
+
     encoder_quad_init(ENCODER1_QUADDEC, ENCODER1_QUADDEC_A, ENCODER1_QUADDEC_B);          // 初始化编码器模块与引脚 正交解码编码器模式
     encoder_quad_init(ENCODER2_QUADDEC, ENCODER2_QUADDEC_A, ENCODER2_QUADDEC_B);          // 初始化编码器模块与引脚 带方向增量编码器模式
 
@@ -226,11 +288,12 @@ int main (void)
     interrupt_set_priority(PIT_PRIORITY, 0);                                              // 设置 PIT 对周期中断的中断优先级为 0
     // 此处编写用户代码 例如外设初始化代码等
 
-    mpu6050_init();                                                                     // 初始化 MPU6050
+                                                                        // 初始化 MPU6050
     //Motor_SetSpeed(Right, 2000);                                                            
     while(1)
     {
-
+        //printf("%f,%f,%f,%f,%f\n",P,I,velocityControlOut,angleControlOut,imu_Angle_Filted.Pitch-MECH_MID);
+        system_delay_ms(10);
     }
 
 
@@ -278,6 +341,7 @@ void pit_handler (void)
     }
     if (time % 25 == 0)
     {
+        //Velocity_Control(SPEED_TARGET);                                                // 速度环控制
         time=0;
     }
 
