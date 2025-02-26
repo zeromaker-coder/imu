@@ -80,13 +80,13 @@
 #define PIT_TIME 1  // 进入中断的时间间隔 单位 ms
 
 #define SPEED_CONTROL_PERIOD 25   // 分 25 份，即25ms内平滑输出
-#define CAR_SPEED_SET 1500        // 目标车速（单位视具体系统而定）
-#define CAR_POSITION_MAX 1000     // 积分上限
-#define CAR_POSITION_MIN -1000    // 积分下限
+#define CAR_SPEED_SET 0        // 目标车速（单位视具体系统而定）
+#define CAR_POSITION_MAX 3000     // 积分上限
+#define CAR_POSITION_MIN -3000    // 积分下限
 
 
 
-#define MECH_MID 1.5f       // 定义机械中值（直立时目标角度），单位：度
+#define MECH_MID -2.5f       // 定义机械中值（直立时目标角度），单位：度
 #define CAR_ANGLE_SET   (MECH_MID  + speedControlOutSmooth)  // 目标角度 单位：度
 int16 encoder1_data = 0;
 int16 encoder2_data = 0;
@@ -104,19 +104,19 @@ float speedControlOutSmooth = 0.0f; // 平滑输出，用作内环角度环的�
 // 外环平滑输出计时变量（单位：ms）
 int speedControlPeriod = 0;
 
-float speed_P = 0.2f;             // 比例系数
-float speed_I = 0.05f;            // 积分系数
+float speed_P = 0.08;             // 比例系数
+float speed_I = 0.005;             // 积分系数
 
 // 角度内环 PID 参数
-float angle_kp = 350.0f;      // 比例系数
-float angle_kd = 1000.0f;      // 微分系数
+float angle_kp = 220.0f;      // 比例系数
+float angle_kd = 100.0f;      // 微分系数
 
 // 角度内环 PID 内部变量
 float angleIntegral = 0.0f;   // 积分累计
 float angleLastError = 0.0f;  // 上一次误差
 float angleControlOut = 0.0f; // 角度内环 PID 输出
 
-float A_P, A_D; //Temp 调参在串口中看看的
+float fP, fI,I; //调参数暂用
 
 // 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
 volatile int16 leftMotorPulseSigma = 0;
@@ -140,7 +140,6 @@ void Motor_Init(void)
     pwm_init(Motor2_PWM, 30000, 0);                                                // 初始化 PWM 通道 频率 30KHz 初始占空比 0%
 }
 
-
 /******************
  * 函数名：Motor_SetSpeed
  * 描述  ：设置电机速度
@@ -151,24 +150,24 @@ void Motor_Init(void)
 void Motor_SetSpeed(motor_enum motor, int16 speed)
 {
     //调试用 不然我桌子鸡飞蛋打
-    // if (imu_Angle_Filted.Pitch - CAR_ANGLE_SET > 30 || imu_Angle_Filted.Pitch - CAR_ANGLE_SET < -30)
-    // {
-    //     speed = 0;
-    // }
+    if (imu_Angle_Filted.Pitch - CAR_ANGLE_SET > 30 || imu_Angle_Filted.Pitch - CAR_ANGLE_SET < -30)
+    {
+        speed = 0;
+    }
     
-    // if(speed > -MOTOR_STOP && speed < MOTOR_STOP)                                    // 速度小于电机停止速度
-    // {
-    //     speed = 0;                                                                  // 设置速度为0
-    // }
-    // else if(0<speed&&speed<MOTOR_DEAD_VAL)                                           // 速度小于电机死区值
-    // {
-    //     speed = MOTOR_DEAD_VAL;                                                     // 设置速度为电机死区值
-    // }
-    // else if(0>speed&&speed>-MOTOR_DEAD_VAL)                                          // 速度小于电机死区值
-    // {
-    //     speed = -MOTOR_DEAD_VAL;                                                    // 设置速度为电机死区值
-    // }
-    // speed = (speed>MOTOR_MAX)?MOTOR_MAX:(speed<-MOTOR_MAX)?-MOTOR_MAX:speed;        // 限制速度范围
+    if(speed > -MOTOR_STOP && speed < MOTOR_STOP)                                    // 速度小于电机停止速度
+    {
+        speed = 0;                                                                  // 设置速度为0
+    }
+    else if(0<speed&&speed<MOTOR_DEAD_VAL)                                           // 速度小于电机死区值
+    {
+        speed = MOTOR_DEAD_VAL;                                                     // 设置速度为电机死区值
+    }
+    else if(0>speed&&speed>-MOTOR_DEAD_VAL)                                          // 速度小于电机死区值
+    {
+        speed = -MOTOR_DEAD_VAL;                                                    // 设置速度为电机死区值
+    }
+    speed = (speed>MOTOR_MAX)?MOTOR_MAX:(speed<-MOTOR_MAX)?-MOTOR_MAX:speed;        // 限制速度范围
 
 
     // DIR1 为1 电机反转
@@ -206,7 +205,6 @@ void Motor_SetSpeed(motor_enum motor, int16 speed)
 // 速度外环 PID 控制函数，每 25ms调用一次
 void Speed_PID_Control(void)
 {
-    float fP, fI;
     float fDelta;  // 速度误差
 
     // 计算当前车速：左右轮脉冲平均
@@ -225,20 +223,20 @@ void Speed_PID_Control(void)
     fP = fDelta * speed_P;
     fI = fDelta * speed_I;
 
-    // 累加积分项（车速度积分，也可理解为车位置）
-    carPosition += fI;
+    // 积分项累加
+    I += fI;
 
     // 积分限幅保护
-    if ((int)carPosition > CAR_POSITION_MAX)
-        carPosition = CAR_POSITION_MAX;
-    if ((int)carPosition < CAR_POSITION_MIN)
-        carPosition = CAR_POSITION_MIN;
+    if ((int)I > CAR_POSITION_MAX)
+    I = CAR_POSITION_MAX;
+    if ((int)I < CAR_POSITION_MIN)
+    I = CAR_POSITION_MIN;
 
     // 保存上一次的控制输出
     speedControlOutOld = speedControlOutNew;
 
     // 当前PI输出 = 比例项 + 积分项
-    speedControlOutNew = fP + carPosition;
+    speedControlOutNew = fP + I;
 
     // 重置平滑输出周期计数器，开始新的1ms平滑累计
     speedControlPeriod = 0;
@@ -270,15 +268,19 @@ void Speed_Control_Output(void)
 void Angle_PID_Control(void)
 {
     float error;
+    float A_P, A_D;
+    static float A_D_last = 0.0f;
     
-    // 误差：目标角度 - 当前角度
     error = imu_Angle_Filted.Pitch - CAR_ANGLE_SET;
     
     // 计算比例项
     A_P = error * angle_kp;
     
     // 计算微分项
-    A_D = (-imu_data.GY) * angle_kd;     // 陀螺仪角速度作为微分项
+    // 给角速度环控制输出一个低通滤波 
+    A_D = (-imu_data.GY) * angle_kd;
+    A_D = A_D_last * 0.7f + A_D * 0.3f;
+    A_D_last = A_D;
     angleLastError = error;
     
     // 角度内环控制输出
@@ -294,6 +296,8 @@ int main (void)
     debug_init();                                                               // 初始化默认 debug uart
 
     // 此处编写用户代码 例如外设初始化代码等
+ 
+
 
     Motor_Init();                             // 初始化电机
     encoder_quad_init(ENCODER1_QUADDEC, ENCODER1_QUADDEC_A, ENCODER1_QUADDEC_B);          // 初始化编码器模块与引脚 正交解码编码器模式
@@ -305,11 +309,11 @@ int main (void)
     // 此处编写用户代码 例如外设初始化代码等
 
     mpu6050_init();                                                                     // 初始化 MPU6050
-    //Motor_SetSpeed(Right, 1000);                                                            
+    //Motor_SetSpeed(Right, 2000);                                                            
     while(1)
     {
 
-        printf("%f,%f,%f\n",imu_Angle_Filted.Pitch - CAR_ANGLE_SET,A_P,A_D);
+        printf("%f,%f,%f,%f\n",CAR_ANGLE_SET,imu_Angle_Filted.Pitch,fP,I);
     }
 
 
@@ -358,11 +362,11 @@ void pit_handler (void)
     if (time % 25 == 0)
     {
         // 速度环控制
-        //Speed_PID_Control();
+        Speed_PID_Control();
 
         time=0;
     }
-    //Speed_Control_Output();                                                          // 速度环平滑输出
+    Speed_Control_Output();                                                          // 速度环平滑输出
 
 
     
