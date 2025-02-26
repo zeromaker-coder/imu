@@ -90,6 +90,8 @@
 #define VELOCITY_FILTER_FACTOR  0.7f    // 速度低通滤波系数
 
 /******************************************************** */
+uint8_t Flag_IsStand = 0;               // 是否直立标志位
+
 int16 encoder1_data = 0;
 int16 encoder2_data = 0;
 volatile int16 leftMotorPulseSigma = 0; // 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
@@ -97,7 +99,7 @@ volatile int16 rightMotorPulseSigma = 0;// 编码器累加变量（假设在编�
 uint16 time = 0;                        // 在pit中断中的时间计数
 
 // 速度外环 PID 参数
-float velocity_kp = 0.008f;             // 速度环比例系数
+float velocity_kp = 0.015f;             // 速度环比例系数
 float velocity_ki = 0.0005f;            // 速度环积分系数
 // 速度外环 PID 内部变量
 float carSpeed = 0.0f;                 // 当前车速
@@ -113,7 +115,7 @@ float velocityControlOut = 0.0f;       // 速度环输出
 /******************************************************** */
 // 角度内环 PID 参数
 float angle_kp = 600.0f;        // 比例系数
-float angle_kd = 600.0f;        // 微分系数
+float angle_kd = 1000.0f;        // 微分系数
 // 角度内环 PID 内部变量
 float angleIntegral = 0.0f;   // 积分累计
 float angleLastError = 0.0f;  // 上一次误差
@@ -341,7 +343,7 @@ void pit_handler (void)
     }
     if (time % 25 == 0)
     {
-        //Velocity_Control(SPEED_TARGET);                                                // 速度环控制
+        Velocity_Control(SPEED_TARGET);                                                // 速度环控制
         time=0;
     }
 
