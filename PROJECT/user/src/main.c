@@ -79,30 +79,12 @@
 
 #define PIT_TIME 1  // 进入中断的时间间隔 单位 ms
 
-#define SPEED_CONTROL_PERIOD 25   // 分 25 份，即25ms内平滑输出
-#define CAR_SPEED_SET 0        // 目标车速（单位视具体系统而定）
-#define CAR_POSITION_MAX 3000     // 积分上限
-#define CAR_POSITION_MIN -3000    // 积分下限
-
-
-
 #define MECH_MID -2.5f       // 定义机械中值（直立时目标角度），单位：度
-#define CAR_ANGLE_SET   (MECH_MID  + speedControlOutSmooth)  // 目标角度 单位：度
+#define CAR_ANGLE_SET   (MECH_MID)  // 目标角度 单位：度
 int16 encoder1_data = 0;
 int16 encoder2_data = 0;
 
 uint16 time = 0;            // 在pit中断中的时间计数
-
-// 外环速度 PID 控制相关全局变量
-float carSpeed = 0.0f;              // 当前车速，由平均左右轮脉冲获得
-float carSpeedPrev = 0.0f;          // 上一次车速，用于低通滤波
-float carPosition = 0.0f;           // 积分项（车速积分，相当于车位置)
-float speedControlOutOld = 0.0f;    // 上一次速度环 PID 输出值
-float speedControlOutNew = 0.0f;    // 最新一次速度环 PID 输出值
-float speedControlOutSmooth = 0.0f; // 平滑输出，用作内环角度环的输入   //真正的输出值 虽然25ms计算一次 相当于两个点之间的平滑过渡
-
-// 外环平滑输出计时变量（单位：ms）
-int speedControlPeriod = 0;
 
 float speed_P = 0.08;             // 比例系数
 float speed_I = 0.005;             // 积分系数
@@ -115,8 +97,6 @@ float angle_kd = 100.0f;      // 微分系数
 float angleIntegral = 0.0f;   // 积分累计
 float angleLastError = 0.0f;  // 上一次误差
 float angleControlOut = 0.0f; // 角度内环 PID 输出
-
-float fP, fI,I; //调参数暂用
 
 // 编码器累加变量（假设在编码器中断中累加，每次控制后需清零）
 volatile int16 leftMotorPulseSigma = 0;
@@ -202,66 +182,6 @@ void Motor_SetSpeed(motor_enum motor, int16 speed)
     }
 }
 
-// 速度外环 PID 控制函数，每 25ms调用一次
-void Speed_PID_Control(void)
-{
-    float fDelta;  // 速度误差
-
-    // 计算当前车速：左右轮脉冲平均
-    carSpeed = (leftMotorPulseSigma + rightMotorPulseSigma) * 0.5f;
-    // 清零编码器累加值，确保下一周期重新采样
-    leftMotorPulseSigma = rightMotorPulseSigma = 0;
-
-    // 对车速进行低通滤波，使车速更平滑
-    carSpeed = 0.7f * carSpeedPrev + 0.3f * carSpeed;
-    carSpeedPrev = carSpeed;
-
-    // 计算车速误差：目标速度与实际速度之差
-    fDelta = CAR_SPEED_SET - carSpeed;
-
-    // 计算比例项和积分项
-    fP = fDelta * speed_P;
-    fI = fDelta * speed_I;
-
-    // 积分项累加
-    I += fI;
-
-    // 积分限幅保护
-    if ((int)I > CAR_POSITION_MAX)
-    I = CAR_POSITION_MAX;
-    if ((int)I < CAR_POSITION_MIN)
-    I = CAR_POSITION_MIN;
-
-    // 保存上一次的控制输出
-    speedControlOutOld = speedControlOutNew;
-
-    // 当前PI输出 = 比例项 + 积分项
-    speedControlOutNew = fP + I;
-
-    // 重置平滑输出周期计数器，开始新的1ms平滑累计
-    speedControlPeriod = 0;
-}
-
-// 速度外环平滑输出函数，每 1ms调用一次（在1ms系统滴答或定时中断中调用）
-// 将 25ms 内计算得到的 PID 输出差值分步平滑累加到上一次的输出上
-void Speed_Control_Output(void)
-{
-    float fValue;
-    // 计算此次 PID 输出变动量
-    fValue = speedControlOutNew - speedControlOutOld;
-    // 按比例分份， (speedControlPeriod+1) / SPEED_CONTROL_PERIOD 为当前分配比例
-    speedControlOutSmooth = fValue * (speedControlPeriod + 1) / SPEED_CONTROL_PERIOD + speedControlOutOld;
-    
-    // 更新平滑计数器，每1ms增加一次
-    speedControlPeriod++;
-    if (speedControlPeriod >= SPEED_CONTROL_PERIOD)
-    {
-        // 当累计满25份时，确保平滑输出与最新PID输出一致
-        speedControlOutSmooth = speedControlOutNew;
-        speedControlPeriod = SPEED_CONTROL_PERIOD;
-    }
-}
-
 
 // 角度内环 PID 控制函数，每 5ms调用一次（与 IMU 解算周期一致）
 // 根据 imu_Angle_Filted.Pitch 与目标机械中值 MECH_MID 的误差计算 PID 输出
@@ -271,7 +191,7 @@ void Angle_PID_Control(void)
     float A_P, A_D;
     static float A_D_last = 0.0f;
     
-    error = imu_Angle_Filted.Pitch - CAR_ANGLE_SET;
+    error = imu_Angle_Filted.Pitch - CAR_ANGLE_SET;  // 计算角度误差
     
     // 计算比例项
     A_P = error * angle_kp;
@@ -297,8 +217,6 @@ int main (void)
 
     // 此处编写用户代码 例如外设初始化代码等
  
-
-
     Motor_Init();                             // 初始化电机
     encoder_quad_init(ENCODER1_QUADDEC, ENCODER1_QUADDEC_A, ENCODER1_QUADDEC_B);          // 初始化编码器模块与引脚 正交解码编码器模式
     encoder_quad_init(ENCODER2_QUADDEC, ENCODER2_QUADDEC_A, ENCODER2_QUADDEC_B);          // 初始化编码器模块与引脚 带方向增量编码器模式
@@ -313,7 +231,6 @@ int main (void)
     while(1)
     {
 
-        printf("%f,%f,%f,%f\n",CAR_ANGLE_SET,imu_Angle_Filted.Pitch,fP,I);
     }
 
 
@@ -361,12 +278,8 @@ void pit_handler (void)
     }
     if (time % 25 == 0)
     {
-        // 速度环控制
-        Speed_PID_Control();
-
         time=0;
     }
-    Speed_Control_Output();                                                          // 速度环平滑输出
 
 
     
